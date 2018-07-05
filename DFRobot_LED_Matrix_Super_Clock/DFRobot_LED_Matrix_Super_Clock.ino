@@ -2,6 +2,10 @@
  * Super Clock - Firebeetle ESP32 and LED Matrix Cover.
  * Many options and modes can be set via a webpage.
  * 
+ * v1.0.0 - init release
+ * v1.0.1 - added pushingbox for Alarm/Timer notification
+ * v1.0.2 - added Binary mode
+ * 
 Copyright (c) 2018 LeRoy Miller
 
     This program is free software: you can redistribute it and/or modify
@@ -26,6 +30,7 @@ https://github.com/kd8bxp
 https://www.youtube.com/channel/UCP6Vh4hfyJF288MTaRAF36w  
 https://kd8bxp.blogspot.com/  
 */
+
 #include <TimeLib.h>
 
 #if defined(ESP8266)
@@ -66,6 +71,7 @@ DFRobot_HT1632C display = DFRobot_HT1632C(DATA, WR,CS);
 WiFiUDP ntpUDP;
 NTPClient timeClient(ntpUDP, "pool.ntp.org");
 WiFiServer server(80);
+WiFiClient notifyClient;
 
 #define TIMEOFFSET -14400 //Find your Time Zone off set Here https://www.epochconverter.com/timezones OFF Set in Seconds
 bool AMPM = 1; //1 = AM PM time, 0 = MILITARY/24 HR Time
@@ -80,7 +86,7 @@ static int taskCore = 0;
 int tempDigit1, tempDigit2, tempDigit3, tempDigit4;
 uint8_t *DIGIT0,*DIGIT1,*DIGIT2, *DIGIT3, *DIGIT0A, *DIGIT1A, *DIGIT2A, *DIGIT3A;
 int dim = 8;
-int scrollDelay; //for original scrolling this is max of 50 and min of 20 it's based on a slideTime of 5 (5 * 6 = 30 default) but can be changed slightly.
+int scrollDelay; //for original scrolling this is max of 50 and min of 30 it's based on a slideTime of 5 (5 * 6 = 30 default) but can be changed slightly.
 
 /* Modes:
  *  0 - Scroll clock (original example)
@@ -92,6 +98,7 @@ int scrollDelay; //for original scrolling this is max of 50 and min of 20 it's b
  *  5 - Scroll Epoch Time - offset adjusted I believe.
  *  6 - The Easiest Star Date Conversion - based on probably the original 6 movies
  *      http://trekguide.com/Stardates.htm   YYMM.DD  YY current year minus 1900, two digit month, and two digit day. Doesn't take into account time.
+ *  7 - Binary Clock Mode - Upper line, 8 4 2 1, lower line 32 16 8 4 2 1    
  */
 
 int mode = 1; 
@@ -110,10 +117,22 @@ int alarm2Hour = 12;
 int alarm2Minute = 00;
 bool alarm1Set = 0; //Off
 bool alarm2Set = 0; //Off
-int timer1 = 00; //minute timer
-int timer2 = 00; //minute timer
+int timer1 = 0; //minute timer
+int timer2 = 0; //minute timer
 int timer1Set = 0; //Off
 int timer2Set = 0; //Off
+int timer1Notified = 0;
+int timer2Notified = 0;
+int alarm1Notified = 0;
+int alarm2Notified = 0;
+
+//Pushingbox Setup
+const char* notifyServer = "api.pushingbox.com";
+String timer1API = "xxxxxx";
+String timer2API = "xxxxxxx";
+String alarm1API = "xxxxx"; //alarm 1 and 2 still are not working yet, this is to setup when I get them working.
+String alarm2API = "xxxxxx";
+
 
 uint8_t COLONON[] = {
   B00000000,
@@ -191,6 +210,18 @@ uint8_t ninebyte3[] = {B01111110,B00000000,B00000000,B00000000};
 
 uint8_t blank[] = {B00000000,B00000000,B00000000,B00000000};
 
+uint8_t blankBinary[] = {
+ B11100000,
+  B10100000,
+  B11100000,
+  B00000000,
+  B00000000,
+  B00000000,
+  B00000000,
+  B00000000
+}; 
+
+
 void coreTask( void * pvParameters ){
 
  while(true) {
@@ -223,6 +254,7 @@ void setup() {
   timeClient.begin();
   timeClient.setTimeOffset(TIMEOFFSET);
   server.begin();
+  
 }
 
 void loop() {
@@ -256,6 +288,15 @@ switch (mode) {
   case 6:
   starDate();
   break;
+  case 7:
+  binary();
+  delay(100);
+  yield();
+  
+  display.clearScreen();
+  display.writeScreen();
+  
+  break;
   default:
   falling();
   break;
@@ -275,6 +316,7 @@ if (SETREMOVE == 1) {
   if (mode == 3) { } //do nothing
   if (mode == 4) {setRemove();}
   if (mode == 5 || mode == 6) { } //do nothing
+  if (mode == 7) { } //do nothing
  /* if (mode == 4) {
   displayCenterCase(tempDigit1,tempDigit4, 2);
   displayCenterCase(tempDigit2,tempDigit3, 1);
@@ -300,9 +342,13 @@ delay(200);
 
 void checkAlarm() {
   if (timer1Set == 1 && timer1 == minutes) {
-  display.isBlinkEnable(true); } //alarm on
+  display.isBlinkEnable(true); 
+  sms(timer1API,timer1Notified);
+  timer1Notified = 1;} //alarm on
   if (timer2Set == 1 && timer2 == minutes) {
-  display.isBlinkEnable(true);} //alarm on
+  display.isBlinkEnable(true);
+  sms(timer2API,timer2Notified);
+  timer2Notified = 1;} //alarm on
   //display.isBlinkEnable(false); //alarm off
 }
 
@@ -599,7 +645,7 @@ void webConfig() {
           client.print("<br><a href=\"0\"><button>Original Scroll</button></a>&nbsp;<a href=\"1\"><button>Fall from Right[Default]</button></a>");
           client.print("&nbsp;<a href=\"2\"><button>Left to Right</button></a>&nbsp;<a href=\"3\"><button>Slide Up</button></a>");
           client.print("&nbsp;<a href=\"4\"><button>Center Scroll</button></a>&nbsp;<a href=\"5\"><button>Epoch Scroll</button></a>");
-
+          
           //Alarm and Timer Settings
           client.print("<br><br><h4>Alarms and Timers</h4><br>");
           client.print("Please use 24 hour format for your hours,<br>13 to 23 is PM, 13 is 1pm, and 23 = 11pm, and Zero is Midnight.<br>");
@@ -631,7 +677,9 @@ void webConfig() {
           client.print("Animated Clear Screen: "); client.print(SETREMOVE ? "Yes" : "No"); client.print("<br>Default yes animate clear screen.");
           client.print("<br>Animated Clear Screen: <a href=\"clear1\"><button>YES</button></a>&nbsp;<a href=\"clear0\"><button>NO</button></a>");
           client.print("<br>Most animations look better with this turned on.<br>");
-          client.print("<br>Just for Fun: <a href=\"6\"><button>[StarDate]</button></a>&nbsp;<br>Based on a YYMM.DD Stardate that probably corresponds to the frist 6 Star Trek Movies & TOS.<br>trekguide.com/Stardates.htm");
+          client.print("<br>Just for Fun: <a href=\"6\"><button>[StarDate]</button></a>&nbsp;<br>Based on a YYMM.DD Stardate that probably corresponds to the frist 6 Star Trek Movies & TOS.<br><a href=\"http://trekguide.com/Stardates.htm\">Trekguide.com</a>");
+          client.print("<br><br>Binary Clock Mode is very EXPERIMENTAL at this stage. This WILL reset/restart your FireBeetle ESP32 if you change to another mode, all settings and timers/alarms will be lost.<br>");
+          client.print("<a href=\"7\"><button>Binary Clock</button></a>");
           client.print("<br><br>Set Another Time Zone: "); client.print("<br>Default: "); client.print(TIMEOFFSET);
           client.print("&nbsp;<br><br><a href=\"default\"><button>[Default Zone]</button></a>&nbsp;<a href=\"UTC\"><button>[UTC]</button></a>");
           client.print("&nbsp;<a href=\"aest\"><button>Sydney, AU[AEST]</button></a>&nbsp;<a href=\"hst\"><button>Hawaii, US[HST]</button></a>");
@@ -770,7 +818,10 @@ else if (strstr(linebuf,"GET /timer10") > 0) {
               }  
         else if (strstr(linebuf,"GET /6") > 0) {
         mode = 6;
-              }             
+              }   
+      else if (strstr(linebuf,"GET /7") > 0) {
+        mode = 7;                  
+      }
 if (strstr(linebuf,"GET /clear1") > 0){
             //Serial.println("LED 1 ON");
             SETREMOVE = 1;
@@ -846,6 +897,7 @@ if (strstr(linebuf,"GET /clear1") > 0){
           else if (strstr(linebuf,"GET /resett1") > 0) {
             timer1Set = 0;
             display.isBlinkEnable(false); //alarm off
+            timer1Notified = 0;
           }
           else if (strstr(linebuf,"GET /t2-5") > 0) {
             timer2 = minutes + 5;
@@ -875,6 +927,7 @@ if (strstr(linebuf,"GET /clear1") > 0){
           else if (strstr(linebuf,"GET /resett2") > 0) {
             timer2Set = 0;
             display.isBlinkEnable(false); //alarm off
+            timer2Notified = 0;
           }
           // you're starting a new line
           currentLineIsBlank = true;
@@ -1329,5 +1382,130 @@ switch (number2) {
 centerRemove(digit);
 
 }
+
+void sms(String apiKey, int notifiedCheck) {
+  if (notifiedCheck == 0) {
+  if (notifyClient.connect(notifyServer,80)) { 
+  Serial.println("Connecting");
+  notifyClient.print("GET /pushingbox?devid=");
+    notifyClient.print(apiKey);
+    notifyClient.println(" HTTP/1.1");
+    notifyClient.print("Host: ");
+    notifyClient.println(notifyServer);
+    notifyClient.println("User-Agent: Arduino");
+    notifyClient.println();
+  }
+  // Read all the lines of the reply from server and print them to Serial
+  while(notifyClient.available()){
+    String line = notifyClient.readStringUntil('\r');
+    Serial.print(line);
+     }
+  
+  Serial.println();
+  Serial.println("closing connection");
+  notifyClient.stop();
+    }
+}  
+
+void binary() {
+   drawBlank();
+   while (mode == 7) {
+    timeClient.update(); 
+ hours = timeClient.getHours();
+ minutes = timeClient.getMinutes();
+   if (hours >= 13) { hours = hours -12; }
+if (hours == 0) {hours = 12;}
+
+byte tempHour = hours;
+byte mask = 0x0001;
+if (tempHour & mask) {
+  display.setPixel(17,1); } else {
+    display.clrPixel(17,1);
+  }
+if (tempHour>>1 & mask) {
+  display.setPixel(13,1); } else {
+    display.clrPixel(13,1);
+  }
+if (tempHour>>2 & mask) {
+  display.setPixel(9,1); } else {
+    display.clrPixel(9,1);
+  }
+if (tempHour>>3 & mask) {
+  display.setPixel(5,1); } else {
+    display.clrPixel(5,1);
+  }
+//Serial.println(hour);
+display.writeScreen();
+byte tempMinute = minutes;
+if (tempMinute & mask) {
+  display.setPixel(21,5); } else {
+    display.clrPixel(21,5); }
+if (tempMinute>>1 & mask) {
+  display.setPixel(17,5); } else {
+    display.clrPixel(17,5); }
+if (tempMinute>>2 & mask) {
+  display.setPixel(13,5); } else {
+    display.clrPixel(13,5); }
+if (tempMinute>>3 & mask) {
+  display.setPixel(9,5); } else {
+    display.clrPixel(9,5); }
+if (tempMinute>>4 & mask) {
+  display.setPixel(5,5); } else {
+    display.clrPixel(5,5); }
+if (tempMinute>>5 & mask) {
+  display.setPixel(1,5); } else {    
+    display.clrPixel(1,5); }
+display.writeScreen();
+yield();
+for (int x = 0; x<3; x++) {
+for (int seconds=0;seconds<24;seconds++) {
+
+//int tempSeconds = seconds;
+//if (seconds > 24) {tempSeconds = 25+seconds;};
+ display.setPixel(24-seconds,7);
+ display.writeScreen();
+ delay(25);
+ display.clrPixel(24-seconds+1,7);
+ display.writeScreen();
+ delay(25);
+}
+
+for (int seconds=0;seconds<24;seconds++) {
+ // int tempSeconds = seconds;
+ // if
+ display.clrPixel(0+seconds-1,7);
+ display.writeScreen();
+ delay(25);
+ display.setPixel(0+seconds+1,7);
+ display.writeScreen();
+ delay(25);
+}
+}
+   }
+  ESP.restart();
+  yield();
+  delay(150);
+}
+
+void drawBlank() {
+ 
+  display.drawImage(blankBinary,8,8,4,0,0);
+  display.drawImage(blankBinary,8,8,8,0,0);
+  display.drawImage(blankBinary,8,8,12,0,0);
+  display.drawImage(blankBinary,8,8,16,0,0);
+  
+  display.drawImage(blankBinary,8,8,0,4,0);
+  display.drawImage(blankBinary,8,8,4,4,0);
+  display.drawImage(blankBinary,8,8,8,4,0);
+  display.drawImage(blankBinary,8,8,12,4,0);
+  display.drawImage(blankBinary,8,8,16,4,0);
+  display.drawImage(blankBinary,8,8,20,4,0);
+  display.drawImage(blankBinary,8,8,24,4,0);
+  //display.drawImage(blankBinary,8,8,8,8,0);
+ display.writeScreen();
+delay(150);
+ 
+}
+
 
 
